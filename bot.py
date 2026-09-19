@@ -10,8 +10,10 @@ Features:
   - Button-driven main menu (reply keyboard) instead of relying on slash commands
   - Language picker (inline flag menu, stored per user)
   - Mood-based movie recommendations
-  - Trending / Top Rated / Upcoming / "Surprise Me" shortcuts
-  - Similar-movies lookup from any movie card
+  - Trending / Top Rated / Upcoming / Now Playing / "Surprise Me" shortcuts
+  - Browse by genre, and search for an actor/actress's filmography
+  - Similar-movies and "full collection" (franchise) lookups from any movie card
+  - Quick 👍 / 👎 rating on any movie card
   - Personal watchlist (add/remove movies)
   - Preferred "Where to Watch" region picker
   - Referral bonus (invite a friend, both of you get bonus free searches)
@@ -20,13 +22,14 @@ Features:
     link (Paystack-style) confirmed manually by an admin
   - Inactivity win-back: users who go quiet for 3+ days get a single
     "come back" nudge with a Trending shortcut
-  - Transient status/prompt messages auto-delete themselves so the chat
-    doesn't fill up with stale bot text
+  - EVERY message the bot sends auto-deletes ~2 minutes after being sent, and
+    says so up front so the user can forward/save it to Telegram Saved
+    Messages first if they want to keep it - keeps the chat from filling up
   - A simple in-flight lock so a double-tap or duplicate update can never
     trigger two searches / two result cards for the same request
   - "Where to Watch" button linking to legal streaming providers (TMDB data),
     instead of any in-bot download
-  - Admin broadcast command
+  - Admin broadcast + stats commands
 
 NOTE ON SCOPE: this bot deliberately does NOT let users pick a video quality
 and download a movie file. TMDB only provides metadata (posters, synopsis,
@@ -88,37 +91,36 @@ ADMIN_USER_IDS = {123456789}                              # <-- TODO: set this
 # The bot owner's @username (no leading "@" here) always gets unlimited
 # access, regardless of premium status or daily quota. Telegram usernames
 # are case-insensitive, so comparisons below are done in lowercase.
-OWNER_USERNAME = "VikingFounder"                           # <-- your handle
+OWNER_USERNAME = "VikingFounder"
 
 # ---- Support / contact info ----
-SUPPORT_USERNAME = "@your_support_handle"                 # <-- TODO
-SUPPORT_EMAIL = "support@example.com"                     # <-- TODO
-SUPPORT_HOURS = "Mon-Sat, 9am-6pm (WAT)"                   # <-- TODO
+SUPPORT_USERNAME = "@VikingFounder"
+SUPPORT_EMAIL = "officialvikingstudio@gmail.com"
+SUPPORT_HOURS = "Mon-Sat, 9am-6pm (WAT)"
 
 # ---- Subscription plans, paid in Telegram Stars (currency code "XTR") ----
 # Telegram Stars have their own exchange rate (set by Telegram, not you) - check
-# the current rate in BotFather/Telegram docs and adjust these amounts so they
-# land close to your target USD prices.
+# the current rate in BotFather/Telegram docs before launch. These were lowered
+# from the original prices to be more affordable (roughly $1.3 / $4 / $19.5 at
+# typical Stars rates - re-check the live rate and adjust if it drifts).
 PLAN_INFO = {
-    "weekly":  {"days": 7,   "stars": 150,  "label": "Weekly"},    # ~ a few dollars
-    "monthly": {"days": 30,  "stars": 500,  "label": "Monthly"},   # target ~$5
-    "yearly":  {"days": 365, "stars": 2999, "label": "Yearly"},
+    "weekly":  {"days": 7,   "stars": 99,   "label": "Weekly"},
+    "monthly": {"days": 30,  "stars": 299,  "label": "Monthly"},
+    "yearly":  {"days": 365, "stars": 1499, "label": "Yearly"},
 }
 
 # ---- Second payment option: a card/bank link (e.g. Paystack payment page),
 # confirmed manually. Paste a real payment-page link per plan to show the
 # button; leave a value blank ("") to hide that plan's card/bank option.
-# Whatever you use (Paystack, Flutterwave, a bank transfer page, etc.) works
-# the same way here: it's just an outbound link + a manual /grant afterwards.
 PAYSTACK_PAYMENT_LINKS = {
     "weekly": "",     # e.g. "https://paystack.com/pay/your-weekly-link"
     "monthly": "",
     "yearly": "",
 }
-PAYSTACK_DISPLAY_PRICES = {   # shown next to each card/bank button
-    "weekly": "₦2,500",
-    "monthly": "₦6,000",
-    "yearly": "₦45,000",
+PAYSTACK_DISPLAY_PRICES = {   # shown next to each card/bank button - lowered to match Stars pricing
+    "weekly": "₦1,500",
+    "monthly": "₦3,500",
+    "yearly": "₦25,000",
 }
 
 FREE_DAILY_LIMIT = 2   # free actions (searches / recommendations) per day
@@ -136,9 +138,13 @@ WATCH_REGIONS = {
     "ZA": "🇿🇦 South Africa",
 }
 
-# How long a "status" message (searching..., prompts, confirmations) stays
-# on screen before the bot deletes it, to keep the chat from filling up.
-EPHEMERAL_DELETE_SECONDS = 45
+# Every bot message auto-deletes this many seconds after being sent, and
+# says so up front so the user has time to forward/save it first.
+AUTO_DELETE_SECONDS = 120
+AUTO_DELETE_NOTICE = (
+    "\n\n🗑 _This message disappears in 2 minutes — forward it to your "
+    "Saved Messages if you want to keep it._"
+)
 
 # Inactivity win-back: nudge a user once they've been quiet this many days.
 INACTIVITY_REMINDER_DAYS = 3
@@ -213,6 +219,7 @@ def get_user(user_id: int) -> dict:
             "last_action_date": None,
             "bonus_actions": 0,
             "watchlist": [],           # list of {"id": int, "title": str}
+            "ratings": {},             # {"<movie_id>": "up" | "down"}
             "referred_by": None,
             "last_active": None,       # ISO date string, updated on every interaction
             "last_reengaged": None,    # ISO date string, last win-back ping sent
@@ -305,12 +312,11 @@ def check_and_use_action_quota(user_id: int, username: str | None = None) -> boo
 
 
 # ============================================================
-# Ephemeral (auto-deleting) status messages
+# Universal auto-delete: every bot-sent message uses one of these two
+# helpers, which (a) appends the "this will vanish in 2 minutes" notice and
+# (b) schedules the message for deletion. This is the ONLY place that sends
+# messages, so there's no risk of a message slipping through un-deleted.
 # ============================================================
-# A lot of the bot's messages are "status" text - a prompt, a confirmation,
-# a quota notice - that only matters for a few seconds. Sending those with
-# send_ephemeral() instead of plain reply_text() means they clean themselves
-# up automatically so old bot chatter doesn't pile up in the chat.
 
 async def _delete_after_delay(bot, chat_id: int, message_id: int, delay: int):
     try:
@@ -320,15 +326,36 @@ async def _delete_after_delay(bot, chat_id: int, message_id: int, delay: int):
         pass  # already gone, or the bot lacks delete rights in this chat - fine either way
 
 
-def schedule_delete(bot, chat_id: int, message_id: int, delay: int = EPHEMERAL_DELETE_SECONDS):
+def schedule_delete(bot, chat_id: int, message_id: int, delay: int = AUTO_DELETE_SECONDS):
     asyncio.create_task(_delete_after_delay(bot, chat_id, message_id, delay))
 
 
-async def send_ephemeral(message, text: str, delay: int = EPHEMERAL_DELETE_SECONDS, **kwargs):
-    """Reply with a transient status/prompt message that deletes itself after `delay` seconds."""
-    sent = await message.reply_text(text, **kwargs)
-    schedule_delete(sent.get_bot(), sent.chat_id, sent.message_id, delay)
+async def send_text(target_message, text: str, delay: int = AUTO_DELETE_SECONDS, notice: bool = True, **kwargs):
+    """Reply with text that auto-deletes after `delay` seconds. Set notice=False
+    only for messages you deliberately want to keep (admin tool output, etc.)."""
+    final_text = text + AUTO_DELETE_NOTICE if notice else text
+    if notice and "parse_mode" not in kwargs:
+        kwargs["parse_mode"] = "Markdown"
+    sent = await target_message.reply_text(final_text, **kwargs)
+    if delay:
+        schedule_delete(sent.get_bot(), sent.chat_id, sent.message_id, delay)
     return sent
+
+
+async def send_photo(target_message, photo: str, caption: str, delay: int = AUTO_DELETE_SECONDS, notice: bool = True, **kwargs):
+    final_caption = caption + AUTO_DELETE_NOTICE if notice else caption
+    if notice and "parse_mode" not in kwargs:
+        kwargs["parse_mode"] = "Markdown"
+    sent = await target_message.reply_photo(photo=photo, caption=final_caption, **kwargs)
+    if delay:
+        schedule_delete(sent.get_bot(), sent.chat_id, sent.message_id, delay)
+    return sent
+
+
+async def finalize_edit(edited_message, delay: int = AUTO_DELETE_SECONDS):
+    """Call after editing a message (e.g. the 'Searching...' -> results edit)
+    to schedule the now-final version for deletion too."""
+    schedule_delete(edited_message.get_bot(), edited_message.chat_id, edited_message.message_id, delay)
 
 
 # ============================================================
@@ -360,7 +387,7 @@ def require_membership(handler):
             return await handler(update, context, *args, **kwargs)
         lang = get_user(user_id).get("language", "en")
         message = update.effective_message
-        await message.reply_text(t(lang, "join_required"), reply_markup=join_gate_keyboard())
+        await send_text(message, t(lang, "join_required"), reply_markup=join_gate_keyboard())
     return wrapped
 
 
@@ -369,10 +396,13 @@ def require_membership(handler):
 # ============================================================
 
 MENU_SEARCH = "🔍 Search Movie"
+MENU_ACTOR = "🧑‍🎤 Search Actor"
 MENU_MOOD = "🎭 Mood Recommend"
+MENU_GENRES = "🗂 Browse Genres"
 MENU_TRENDING = "📺 Trending"
 MENU_TOP_RATED = "🏆 Top Rated"
 MENU_UPCOMING = "📅 Upcoming"
+MENU_NOW_PLAYING = "🎥 Now Playing"
 MENU_SURPRISE = "🎲 Surprise Me"
 MENU_WATCHLIST = "🎬 My Watchlist"
 MENU_REGION = "🌍 Watch Region"
@@ -385,12 +415,14 @@ MENU_SUPPORT = "🛟 Support"
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
-            [MENU_SEARCH, MENU_MOOD],
+            [MENU_SEARCH, MENU_ACTOR],
+            [MENU_MOOD, MENU_GENRES],
             [MENU_TRENDING, MENU_TOP_RATED],
-            [MENU_UPCOMING, MENU_SURPRISE],
-            [MENU_WATCHLIST, MENU_REGION],
-            [MENU_LANGUAGE, MENU_PREMIUM],
-            [MENU_INVITE, MENU_SUPPORT],
+            [MENU_UPCOMING, MENU_NOW_PLAYING],
+            [MENU_SURPRISE, MENU_WATCHLIST],
+            [MENU_REGION, MENU_LANGUAGE],
+            [MENU_PREMIUM, MENU_INVITE],
+            [MENU_SUPPORT],
         ],
         resize_keyboard=True,
     )
@@ -440,6 +472,10 @@ def tmdb_discover_by_genres(genre_ids: list, language: str = "en"):
     ).get("results", [])
 
 
+def tmdb_genre_list(language: str = "en"):
+    return _tmdb_get("/genre/movie/list", {"language": language}).get("genres", [])
+
+
 def tmdb_trending_movies(language: str = "en"):
     return _tmdb_get("/trending/movie/day", {"language": language}).get("results", [])
 
@@ -452,8 +488,24 @@ def tmdb_upcoming_movies(language: str = "en", region: str = DEFAULT_WATCH_REGIO
     return _tmdb_get("/movie/upcoming", {"language": language, "region": region}).get("results", [])
 
 
+def tmdb_now_playing_movies(language: str = "en", region: str = DEFAULT_WATCH_REGION):
+    return _tmdb_get("/movie/now_playing", {"language": language, "region": region}).get("results", [])
+
+
 def tmdb_similar_movies(movie_id: int, language: str = "en"):
     return _tmdb_get(f"/movie/{movie_id}/similar", {"language": language}).get("results", [])
+
+
+def tmdb_collection_details(collection_id: int, language: str = "en"):
+    return _tmdb_get(f"/collection/{collection_id}", {"language": language})
+
+
+def tmdb_search_person(query: str, language: str = "en"):
+    return _tmdb_get("/search/person", {"query": query, "language": language}).get("results", [])
+
+
+def tmdb_person_movie_credits(person_id: int, language: str = "en"):
+    return _tmdb_get(f"/person/{person_id}/movie_credits", {"language": language}).get("cast", [])
 
 
 def tmdb_get_movie_details(movie_id: int, language: str = "en"):
@@ -497,6 +549,18 @@ def results_keyboard(results: list) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+def genre_keyboard(genres: list) -> InlineKeyboardMarkup:
+    rows, row = [], []
+    for g in genres[:20]:
+        row.append(InlineKeyboardButton(g["name"], callback_data=f"genre:{g['id']}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
+
+
 # ============================================================
 # Shared "movie card" renderer (used by search results, similar-movies,
 # watchlist taps, and Surprise Me, so there's exactly one code path that
@@ -508,12 +572,14 @@ async def send_movie_card(target_message, movie_id: int, lang: str, region: str 
     try:
         details = tmdb_get_movie_details(movie_id, language=lang)
     except requests.RequestException:
-        await target_message.reply_text("⚠️ Couldn't load movie details. Please try again.")
+        await send_text(target_message, "⚠️ Couldn't load movie details. Please try again.")
         return
 
     title = details.get("title", "Untitled")
     year = (details.get("release_date") or "Unknown")[:4]
     overview = details.get("overview") or "No synopsis available."
+    if len(overview) > 400:
+        overview = overview[:397] + "..."
     rating = details.get("vote_average", 0)
     genres = ", ".join(g["name"] for g in details.get("genres", [])) or "Unknown"
     runtime = details.get("runtime")
@@ -522,6 +588,7 @@ async def send_movie_card(target_message, movie_id: int, lang: str, region: str 
     trailer_url = get_trailer_url(details)
     poster_path = details.get("poster_path")
     provider_names, watch_link = tmdb_get_watch_link(movie_id, region=region)
+    collection = details.get("belongs_to_collection")
 
     caption = (
         f"🎬 *{title}* ({year})\n\n"
@@ -549,14 +616,20 @@ async def send_movie_card(target_message, movie_id: int, lang: str, region: str 
             InlineKeyboardButton("🔁 Similar", callback_data=f"similar:{movie_id}"),
         ]
     )
+    if collection:
+        buttons.append([InlineKeyboardButton(f"🎞 Full \"{collection['name']}\" Collection", callback_data=f"collection:{collection['id']}")])
+    buttons.append(
+        [
+            InlineKeyboardButton("👍", callback_data=f"rate:{movie_id}:up"),
+            InlineKeyboardButton("👎", callback_data=f"rate:{movie_id}:down"),
+        ]
+    )
     keyboard = InlineKeyboardMarkup(buttons)
 
     if poster_path:
-        await target_message.reply_photo(
-            photo=f"{TMDB_IMAGE_BASE}{poster_path}", caption=caption, parse_mode="Markdown", reply_markup=keyboard
-        )
+        await send_photo(target_message, f"{TMDB_IMAGE_BASE}{poster_path}", caption, reply_markup=keyboard)
     else:
-        await target_message.reply_text(caption, parse_mode="Markdown", reply_markup=keyboard)
+        await send_text(target_message, caption, reply_markup=keyboard)
 
 
 # ============================================================
@@ -585,11 +658,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Membership is re-checked every single /start, on purpose.
     if not await is_channel_member(context, user_id):
         lang = get_user(user_id).get("language", "en")
-        await update.message.reply_text(t(lang, "join_required"), reply_markup=join_gate_keyboard())
+        await send_text(update.message, t(lang, "join_required"), reply_markup=join_gate_keyboard())
         return
 
     lang = get_user(user_id).get("language", "en")
-    await update.message.reply_text(t(lang, "welcome"), parse_mode="Markdown", reply_markup=main_menu_keyboard())
+    await send_text(update.message, t(lang, "welcome"), reply_markup=main_menu_keyboard())
 
 
 async def membership_recheck_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -600,15 +673,16 @@ async def membership_recheck_callback(update: Update, context: ContextTypes.DEFA
     if await is_channel_member(context, user_id):
         await query.answer("✅ Verified!")
         await query.edit_message_text(t(lang, "welcome"), parse_mode="Markdown")
-        sent = await query.message.reply_text("Menu ready 👇", reply_markup=main_menu_keyboard())
-        schedule_delete(sent.get_bot(), sent.chat_id, sent.message_id, EPHEMERAL_DELETE_SECONDS)
+        await finalize_edit(query.message)
+        await send_text(query.message, "Menu ready 👇", reply_markup=main_menu_keyboard())
     else:
         await query.answer(t(lang, "not_joined_yet"), show_alert=True)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     touch_last_active(update.effective_user.id)
-    await update.message.reply_text(
+    await send_text(
+        update.message,
         "Use the menu buttons below, or just type a movie name to search.\n\n"
         "/premium - view subscription plans\n"
         "/invite - get your referral link\n"
@@ -641,7 +715,7 @@ async def language_set_callback(update: Update, context: ContextTypes.DEFAULT_TY
     update_user(query.from_user.id, language=code)
     label, flag = LANGUAGES[code]
     await query.edit_message_text(f"Language set to {label} {flag}")
-    schedule_delete(context.bot, query.message.chat_id, query.message.message_id, EPHEMERAL_DELETE_SECONDS)
+    await finalize_edit(query.message)
 
 
 # ---- Watch region ----
@@ -667,7 +741,7 @@ async def region_set_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     update_user(query.from_user.id, region=code)
     await query.edit_message_text(f"🌍 Watch region set to {WATCH_REGIONS[code]}. \"Where to Watch\" links will use this from now on.")
-    schedule_delete(context.bot, query.message.chat_id, query.message.message_id, EPHEMERAL_DELETE_SECONDS)
+    await finalize_edit(query.message)
 
 
 # ---- Search / details ----
@@ -675,6 +749,10 @@ async def region_set_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 # duplicate Telegram update from ever starting a second search (and
 # therefore a second results/movie card) for the same user at the same time.
 _active_actions: set[int] = set()
+
+# Simple pending-input state for flows that need a follow-up free-text
+# message (currently just "search for an actor").
+_awaiting_input: dict[int, str] = {}
 
 
 async def run_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
@@ -688,7 +766,7 @@ async def run_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: 
         lang = get_user(user_id).get("language", "en")
 
         if not check_and_use_action_quota(user_id, username):
-            await send_ephemeral(update.message, t(lang, "limit_reached", limit=FREE_DAILY_LIMIT))
+            await send_text(update.message, t(lang, "limit_reached", limit=FREE_DAILY_LIMIT))
             return
 
         searching_msg = await update.message.reply_text(t(lang, "searching", query=query))
@@ -696,18 +774,22 @@ async def run_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: 
             results = tmdb_search_movies(query, language=lang)
         except requests.RequestException:
             await searching_msg.edit_text("⚠️ Couldn't reach the movie database right now. Please try again in a moment.")
+            await finalize_edit(searching_msg)
             return
 
         if not results:
-            await searching_msg.edit_text(t(lang, "no_results", query=query))
+            await searching_msg.edit_text(t(lang, "no_results", query=query) + AUTO_DELETE_NOTICE, parse_mode="Markdown")
+            await finalize_edit(searching_msg)
             return
 
         # Edit the same "searching..." message into the results list, so
         # exactly one message is ever shown for a single search - never two.
         await searching_msg.edit_text(
-            t(lang, "found_results", count=min(len(results), 8), query=query),
+            t(lang, "found_results", count=min(len(results), 8), query=query) + AUTO_DELETE_NOTICE,
+            parse_mode="Markdown",
             reply_markup=results_keyboard(results),
         )
+        await finalize_edit(searching_msg)
     finally:
         _active_actions.discard(user_id)
 
@@ -733,12 +815,129 @@ async def similar_movies_callback(update: Update, context: ContextTypes.DEFAULT_
     try:
         results = tmdb_similar_movies(movie_id, language=lang)
     except requests.RequestException:
-        await query.message.reply_text("⚠️ Couldn't load similar movies. Please try again.")
+        await send_text(query.message, "⚠️ Couldn't load similar movies. Please try again.")
         return
     if not results:
-        await query.message.reply_text("No similar movies found for that one.")
+        await send_text(query.message, "No similar movies found for that one.")
         return
-    await query.message.reply_text("🔁 *Similar movies:*", parse_mode="Markdown", reply_markup=results_keyboard(results))
+    await send_text(query.message, "🔁 *Similar movies:*", reply_markup=results_keyboard(results))
+
+
+async def collection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    touch_last_active(user_id)
+    lang = get_user(user_id).get("language", "en")
+    collection_id = int(query.data.split(":")[1])
+    try:
+        data = tmdb_collection_details(collection_id, language=lang)
+    except requests.RequestException:
+        await send_text(query.message, "⚠️ Couldn't load the collection. Please try again.")
+        return
+    parts = data.get("parts", [])
+    if not parts:
+        await send_text(query.message, "No other movies found in this collection.")
+        return
+    await send_text(
+        query.message,
+        f"🎞 *{data.get('name', 'Collection')}:*",
+        reply_markup=results_keyboard(parts),
+    )
+
+
+async def rate_movie_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    touch_last_active(user_id)
+    _, movie_id_str, direction = query.data.split(":")
+    user = get_user(user_id)
+    user.setdefault("ratings", {})[movie_id_str] = direction
+    _save_users(_users_cache)
+    await query.answer("👍 Thanks for rating!" if direction == "up" else "Thanks, noted!")
+
+
+# ---- Genre browsing ----
+
+async def send_genre_picker(message, lang: str):
+    try:
+        genres = tmdb_genre_list(language=lang)
+    except requests.RequestException:
+        await send_text(message, "⚠️ Couldn't reach the movie database right now. Please try again.")
+        return
+    if not genres:
+        await send_text(message, "No genres available right now.")
+        return
+    await send_text(message, "🗂 Pick a genre:", reply_markup=genre_keyboard(genres))
+
+
+async def genre_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    touch_last_active(user_id)
+    lang = get_user(user_id).get("language", "en")
+    genre_id = int(query.data.split(":")[1])
+    try:
+        results = tmdb_discover_by_genres([genre_id], language=lang)
+    except requests.RequestException:
+        await send_text(query.message, "⚠️ Couldn't reach the movie database right now. Please try again.")
+        return
+    if not results:
+        await send_text(query.message, "No movies found for that genre right now.")
+        return
+    await send_text(query.message, "🗂 *Movies in this genre:*", reply_markup=results_keyboard(results))
+
+
+# ---- Actor / actress search ----
+
+async def prompt_actor_search(message, user_id: int):
+    _awaiting_input[user_id] = "actor_search"
+    await send_text(message, "🧑‍🎤 Type the actor or actress's name:")
+
+
+async def run_actor_search(update: Update, context: ContextTypes.DEFAULT_TYPE, name: str):
+    user_id = update.effective_user.id
+    if user_id in _active_actions:
+        return
+    _active_actions.add(user_id)
+    try:
+        touch_last_active(user_id)
+        username = update.effective_user.username
+        lang = get_user(user_id).get("language", "en")
+
+        if not check_and_use_action_quota(user_id, username):
+            await send_text(update.message, t(lang, "limit_reached", limit=FREE_DAILY_LIMIT))
+            return
+
+        try:
+            people = tmdb_search_person(name, language=lang)
+        except requests.RequestException:
+            await send_text(update.message, "⚠️ Couldn't reach the movie database right now. Please try again.")
+            return
+        if not people:
+            await send_text(update.message, f"No actor/actress found for \"{name}\".")
+            return
+
+        person = people[0]
+        try:
+            credits = tmdb_person_movie_credits(person["id"], language=lang)
+        except requests.RequestException:
+            await send_text(update.message, "⚠️ Couldn't load their filmography. Please try again.")
+            return
+
+        credits = sorted(credits, key=lambda m: m.get("popularity", 0), reverse=True)
+        if not credits:
+            await send_text(update.message, f"No movies found for {person.get('name', name)}.")
+            return
+
+        await send_text(
+            update.message,
+            f"🧑‍🎤 *{person.get('name', name)}* — top movies:",
+            reply_markup=results_keyboard(credits),
+        )
+    finally:
+        _active_actions.discard(user_id)
 
 
 # ---- Mood recommendations ----
@@ -774,44 +973,46 @@ async def send_mood_recommendations(message, user_id: int, mood: str, username: 
         if not check_and_use_action_quota(user_id, username):
             text = t(lang, "limit_reached", limit=FREE_DAILY_LIMIT)
             if edit:
-                await message.edit_text(text)
+                await message.edit_text(text + AUTO_DELETE_NOTICE, parse_mode="Markdown")
+                await finalize_edit(message)
             else:
-                await send_ephemeral(message, text)
+                await send_text(message, text)
             return
 
         try:
             results = tmdb_discover_by_genres(MOOD_GENRES[mood], language=lang)
         except requests.RequestException:
-            await message.reply_text("⚠️ Couldn't reach the movie database right now. Please try again.")
+            await send_text(message, "⚠️ Couldn't reach the movie database right now. Please try again.")
             return
 
         if not results:
-            await message.reply_text(f"No recommendations found for \"{mood}\" right now.")
+            await send_text(message, f"No recommendations found for \"{mood}\" right now.")
             return
 
         text = f"Here's what fits a *{mood}* mood:"
         markup = results_keyboard(results)
         if edit:
-            await message.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+            await message.edit_text(text + AUTO_DELETE_NOTICE, parse_mode="Markdown", reply_markup=markup)
+            await finalize_edit(message)
         else:
-            await message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+            await send_text(message, text, reply_markup=markup)
     finally:
         _active_actions.discard(user_id)
 
 
-# ---- Trending / Top Rated / Upcoming / Surprise Me ----
+# ---- Trending / Top Rated / Upcoming / Now Playing / Surprise Me ----
 
 async def send_trending(message, user_id: int):
     lang = get_user(user_id).get("language", "en")
     try:
         results = tmdb_trending_movies(language=lang)
     except requests.RequestException:
-        await message.reply_text("⚠️ Couldn't reach the movie database right now. Please try again.")
+        await send_text(message, "⚠️ Couldn't reach the movie database right now. Please try again.")
         return
     if not results:
-        await message.reply_text("No trending movies found right now.")
+        await send_text(message, "No trending movies found right now.")
         return
-    await message.reply_text("🔥 *Trending today:*", parse_mode="Markdown", reply_markup=results_keyboard(results))
+    await send_text(message, "🔥 *Trending today:*", reply_markup=results_keyboard(results))
 
 
 async def send_top_rated(message, user_id: int):
@@ -819,12 +1020,12 @@ async def send_top_rated(message, user_id: int):
     try:
         results = tmdb_top_rated_movies(language=lang)
     except requests.RequestException:
-        await message.reply_text("⚠️ Couldn't reach the movie database right now. Please try again.")
+        await send_text(message, "⚠️ Couldn't reach the movie database right now. Please try again.")
         return
     if not results:
-        await message.reply_text("No top-rated movies found right now.")
+        await send_text(message, "No top-rated movies found right now.")
         return
-    await message.reply_text("🏆 *Top rated of all time:*", parse_mode="Markdown", reply_markup=results_keyboard(results))
+    await send_text(message, "🏆 *Top rated of all time:*", reply_markup=results_keyboard(results))
 
 
 async def send_upcoming(message, user_id: int):
@@ -833,12 +1034,26 @@ async def send_upcoming(message, user_id: int):
     try:
         results = tmdb_upcoming_movies(language=lang, region=region)
     except requests.RequestException:
-        await message.reply_text("⚠️ Couldn't reach the movie database right now. Please try again.")
+        await send_text(message, "⚠️ Couldn't reach the movie database right now. Please try again.")
         return
     if not results:
-        await message.reply_text("No upcoming releases found for your region right now.")
+        await send_text(message, "No upcoming releases found for your region right now.")
         return
-    await message.reply_text("📅 *Coming soon:*", parse_mode="Markdown", reply_markup=results_keyboard(results))
+    await send_text(message, "📅 *Coming soon:*", reply_markup=results_keyboard(results))
+
+
+async def send_now_playing(message, user_id: int):
+    lang = get_user(user_id).get("language", "en")
+    region = get_watch_region(user_id)
+    try:
+        results = tmdb_now_playing_movies(language=lang, region=region)
+    except requests.RequestException:
+        await send_text(message, "⚠️ Couldn't reach the movie database right now. Please try again.")
+        return
+    if not results:
+        await send_text(message, "No movies currently in theaters for your region.")
+        return
+    await send_text(message, "🎥 *Now playing in theaters:*", reply_markup=results_keyboard(results))
 
 
 async def send_surprise(message, user_id: int, username: str | None = None):
@@ -849,21 +1064,21 @@ async def send_surprise(message, user_id: int, username: str | None = None):
         touch_last_active(user_id)
         lang = get_user(user_id).get("language", "en")
         if not check_and_use_action_quota(user_id, username):
-            await send_ephemeral(message, t(lang, "limit_reached", limit=FREE_DAILY_LIMIT))
+            await send_text(message, t(lang, "limit_reached", limit=FREE_DAILY_LIMIT))
             return
 
         try:
             pool = tmdb_trending_movies(language=lang) + tmdb_top_rated_movies(language=lang)
         except requests.RequestException:
-            await message.reply_text("⚠️ Couldn't reach the movie database right now. Please try again.")
+            await send_text(message, "⚠️ Couldn't reach the movie database right now. Please try again.")
             return
         if not pool:
-            await message.reply_text("Couldn't find a surprise pick right now, try again in a bit.")
+            await send_text(message, "Couldn't find a surprise pick right now, try again in a bit.")
             return
 
         pick = random.choice(pool)
         region = get_watch_region(user_id)
-        await message.reply_text("🎲 Your surprise pick:")
+        await send_text(message, "🎲 Your surprise pick:", delay=AUTO_DELETE_SECONDS)
         await send_movie_card(message, pick["id"], lang, region=region)
     finally:
         _active_actions.discard(user_id)
@@ -898,7 +1113,7 @@ async def send_watchlist(message, user_id: int):
     user = get_user(user_id)
     watchlist = user.get("watchlist", [])
     if not watchlist:
-        await message.reply_text("Your watchlist is empty. Add movies with the ➕ button on any movie card.")
+        await send_text(message, "Your watchlist is empty. Add movies with the ➕ button on any movie card.")
         return
     buttons = [
         [
@@ -907,7 +1122,7 @@ async def send_watchlist(message, user_id: int):
         ]
         for item in watchlist[:20]
     ]
-    await message.reply_text("🎬 *Your Watchlist:*", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+    await send_text(message, "🎬 *Your Watchlist:*", reply_markup=InlineKeyboardMarkup(buttons))
 
 
 async def watchlist_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -929,11 +1144,11 @@ async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     touch_last_active(user_id)
     bot_username = context.bot.username
     link = f"https://t.me/{bot_username}?start=ref_{user_id}"
-    await update.message.reply_text(
+    await send_text(
+        update.message,
         "🎁 *Invite friends, get bonus searches!*\n\n"
         f"Share your link:\n{link}\n\n"
         f"You and your friend each get +{REFERRAL_BONUS} bonus free actions when they join.",
-        parse_mode="Markdown",
     )
 
 
@@ -961,12 +1176,12 @@ async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     touch_last_active(user_id)
 
     if is_owner(username):
-        await update.message.reply_text("👑 You're the bot owner — you already have unlimited access, no plan needed.")
+        await send_text(update.message, "👑 You're the bot owner — you already have unlimited access, no plan needed.")
         return
 
     if is_premium(user_id):
         days = days_left_of_premium(user_id)
-        await update.message.reply_text(f"✅ You already have Premium — {days} day(s) left.")
+        await send_text(update.message, f"✅ You already have Premium — {days} day(s) left.")
         return
 
     text = (
@@ -975,18 +1190,18 @@ async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Priority support\n\n"
         "Pay with Telegram Stars (instant) or card/bank (manual confirmation):"
     )
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=premium_keyboard())
+    await send_text(update.message, text, reply_markup=premium_keyboard())
 
 
 async def pay_proof_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     touch_last_active(query.from_user.id)
-    await query.message.reply_text(
+    await send_text(
+        query.message,
         "🧾 *Manual payment confirmation*\n\n"
         f"Send your payment screenshot/reference to {SUPPORT_USERNAME} along with your Telegram "
         "username and the plan you paid for. An admin will activate your Premium shortly after verifying.",
-        parse_mode="Markdown",
     )
 
 
@@ -998,6 +1213,8 @@ async def buy_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     plan = PLAN_INFO[plan_key]
     user_id = query.from_user.id
 
+    # Left un-auto-deleted on purpose: this opens Telegram's own payment
+    # sheet, and the user may need a moment to complete or revisit it.
     await context.bot.send_invoice(
         chat_id=query.message.chat_id,
         title=f"Viking Cinema Premium - {plan['label']}",
@@ -1021,11 +1238,12 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
         _, plan_key, user_id_str = payment.invoice_payload.split(":")
         user_id = int(user_id_str)
     except (ValueError, KeyError):
-        await update.message.reply_text("⚠️ Payment received but couldn't be matched to a plan. Contact support.")
+        await send_text(update.message, "⚠️ Payment received but couldn't be matched to a plan. Contact support.")
         return
 
     activate_premium(user_id, plan_key)
     days_left = days_left_of_premium(user_id)
+    # Kept as a permanent receipt rather than auto-deleted.
     await update.message.reply_text(
         f"✅ Payment received! Premium is active — {days_left} day(s) remaining. Enjoy unlimited access!"
     )
@@ -1102,13 +1320,13 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     touch_last_active(update.effective_user.id)
     text = (
-        "🛟 *Need help?*\n\n"
+        "🛟 Need help?\n\n"
         f"• Telegram: {SUPPORT_USERNAME}\n"
         f"• Email: {SUPPORT_EMAIL}\n"
         f"• Hours: {SUPPORT_HOURS}\n\n"
         "Include your Telegram username and a short description of the issue."
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await send_text(update.message, text)
 
 
 # ============================================================
@@ -1139,17 +1357,19 @@ async def _send_inactivity_reminders(bot):
                 pass
 
         try:
-            await bot.send_message(
+            sent = await bot.send_message(
                 chat_id=int(uid_str),
                 text=(
                     "👋 *We miss you at Viking Cinema!*\n\n"
                     "New movies have landed since you last checked in. Tap below to see what's trending 🎬"
+                    + AUTO_DELETE_NOTICE
                 ),
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton("🔥 See Trending Now", callback_data="reengage_trending")]]
                 ),
             )
+            schedule_delete(bot, sent.chat_id, sent.message_id, AUTO_DELETE_SECONDS)
             user["last_reengaged"] = today.isoformat()
             _save_users(_users_cache)
         except TelegramError:
@@ -1189,22 +1409,32 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     touch_last_active(user_id)
     lang = get_user(user_id).get("language", "en")
 
+    # A pending "type a name" flow (currently just actor search) takes
+    # priority over everything else, including menu button labels.
+    pending = _awaiting_input.pop(user_id, None)
+    if pending == "actor_search":
+        await run_actor_search(update, context, text)
+        return
+
     routes = {
-        MENU_MOOD: lambda: update.message.reply_text("How are you feeling? Pick a mood:", reply_markup=mood_keyboard()),
+        MENU_MOOD: lambda: send_text(update.message, "How are you feeling? Pick a mood:", reply_markup=mood_keyboard()),
+        MENU_GENRES: lambda: send_genre_picker(update.message, lang),
+        MENU_ACTOR: lambda: prompt_actor_search(update.message, user_id),
         MENU_TRENDING: lambda: send_trending(update.message, user_id),
         MENU_TOP_RATED: lambda: send_top_rated(update.message, user_id),
         MENU_UPCOMING: lambda: send_upcoming(update.message, user_id),
+        MENU_NOW_PLAYING: lambda: send_now_playing(update.message, user_id),
         MENU_SURPRISE: lambda: send_surprise(update.message, user_id, username),
         MENU_WATCHLIST: lambda: send_watchlist(update.message, user_id),
-        MENU_REGION: lambda: update.message.reply_text("🌍 Choose your preferred watch region:", reply_markup=region_keyboard()),
-        MENU_LANGUAGE: lambda: update.message.reply_text(t(lang, "choose_language"), reply_markup=language_keyboard()),
+        MENU_REGION: lambda: send_text(update.message, "🌍 Choose your preferred watch region:", reply_markup=region_keyboard()),
+        MENU_LANGUAGE: lambda: send_text(update.message, t(lang, "choose_language"), reply_markup=language_keyboard()),
         MENU_PREMIUM: lambda: premium_command(update, context),
         MENU_INVITE: lambda: invite_command(update, context),
         MENU_SUPPORT: lambda: support_command(update, context),
     }
 
     if text == MENU_SEARCH:
-        await send_ephemeral(update.message, "Type the movie name you want to search:", delay=EPHEMERAL_DELETE_SECONDS)
+        await send_text(update.message, "Type the movie name you want to search:")
         return
 
     if text in routes:
@@ -1218,7 +1448,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 @require_membership
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usage: /search <movie name>")
+        await send_text(update.message, "Usage: /search <movie name>")
         return
     await run_search(update, context, " ".join(context.args))
 
@@ -1234,7 +1464,7 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             username=update.effective_user.username,
         )
         return
-    await update.message.reply_text("How are you feeling? Pick a mood:", reply_markup=mood_keyboard())
+    await send_text(update.message, "How are you feeling? Pick a mood:", reply_markup=mood_keyboard())
 
 
 # ============================================================
@@ -1264,8 +1494,11 @@ def main():
     app.add_handler(CallbackQueryHandler(language_set_callback, pattern=r"^lang:"))
     app.add_handler(CallbackQueryHandler(region_set_callback, pattern=r"^region:"))
     app.add_handler(CallbackQueryHandler(mood_pick_callback, pattern=r"^mood:"))
+    app.add_handler(CallbackQueryHandler(genre_pick_callback, pattern=r"^genre:"))
     app.add_handler(CallbackQueryHandler(movie_details_callback, pattern=r"^movie:"))
     app.add_handler(CallbackQueryHandler(similar_movies_callback, pattern=r"^similar:"))
+    app.add_handler(CallbackQueryHandler(collection_callback, pattern=r"^collection:"))
+    app.add_handler(CallbackQueryHandler(rate_movie_callback, pattern=r"^rate:"))
     app.add_handler(CallbackQueryHandler(watchlist_add_callback, pattern=r"^watchlist_add:"))
     app.add_handler(CallbackQueryHandler(watchlist_remove_callback, pattern=r"^watchlist_remove:"))
     app.add_handler(CallbackQueryHandler(buy_plan_callback, pattern=r"^buy:"))
